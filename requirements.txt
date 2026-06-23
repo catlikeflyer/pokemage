@@ -1,0 +1,11 @@
+# Pokémon TCG RL Pipeline – Dependencies
+# Install with:  pip install -r requirements.txt
+
+torch>=2.1.0
+numpy>=1.24.0
+
+# Optional: only needed for --env live
+# kaggle-environments>=1.14.0
+
+# Optional: accelerated data loading & logging
+# tqdm>=4.65.0

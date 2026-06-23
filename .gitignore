@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+submission/
+*.zip
+pokemage_agent.zip
+
+# Model Checkpoints / Weights
+checkpoints/
+
+# Application Logs
+logs/
+*.log
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
