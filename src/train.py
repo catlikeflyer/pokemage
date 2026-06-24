@@ -398,8 +398,14 @@ def collect_episode(
     """Run one complete game and return the trajectory."""
     state_feat, action_feat, action_mask = env.reset()
     transitions: List[Transition] = []
-    done = False
 
+    # Guard: if reset() finished with done=True (e.g. cabt setup failure or
+    # immediate forfeit), return an empty trajectory rather than crashing.
+    if getattr(env, "_done", False):
+        logger.warning("collect_episode: env already done after reset() — skipping episode")
+        return transitions
+
+    done = False
     while not done:
         s_t = torch.from_numpy(state_feat).unsqueeze(0).to(device)   # (1, STATE_DIM)
         a_t = torch.from_numpy(action_feat).unsqueeze(0).to(device)  # (1, N, ACTION_DIM)

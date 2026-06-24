@@ -359,6 +359,7 @@ class LiveCabtEnv(CabtEnvBase):
                 "Use MockCabtEnv or install the competition SDK."
             ) from exc
 
+        self._deck_key = deck_key
         self._deck = STARTER_DECKS.get(deck_key, STARTER_DECKS["dragapult_ex"])
         self._env = make("cabt", debug=False)
         self._trainer = None
@@ -368,15 +369,145 @@ class LiveCabtEnv(CabtEnvBase):
 
     # ------------------------------------------------------------------
     def reset(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        # cabt expects the deck on the first step (returned as the "action")
+        """Start a new episode.
+
+        cabt protocol (trainer API):
+          Step 0  – both players submit their 60-card decks (integer card IDs).
+          Step 1+ – cabt runs the setup phase (draw hands, place active, prizes).
+                    obs.current remains None until setup is complete.
+          Game    – obs.current is populated; normal play begins.
+        """
+        from kaggle_environments import make  # deferred to keep import lazy
+        self._env     = make("cabt", debug=False)
         self._trainer = self._env.train([None, "random"])
-        self._obs = self._trainer.reset()
-        # Return deck on first observation  (competition protocol)
-        deck_response = self._deck[:]
-        self._obs, reward, done, info = self._trainer.step(deck_response)
-        self._done = done
+        self._obs     = self._trainer.reset()
+        self._done    = False
         self.current_player = 0
+
+        # ── Build a valid integer-ID deck from EN_Card_Data.csv ──────────────
+        deck = self._build_integer_deck()
+        logger.info("Submitting deck (%d cards, first=%s)", len(deck), deck[:3])
+
+        # ── Step 0: deck submission ──────────────────────────────────────────
+        try:
+            self._obs, _, done, _ = self._trainer.step(deck)
+            self._done = bool(done)
+        except Exception as exc:
+            logger.warning("Deck submission failed: %s", exc)
+
+        # ── Setup phase: loop until the game has actually started ─────────────
+        # cabt protocol after deck submission:
+        #   1. obs.select may be populated → player must pick Active Pokémon
+        #   2. obs.actions may be populated → normal action step
+        #   3. Otherwise send None → engine auto-advances (draws, prizes etc.)
+        # We keep stepping until handCount > 0 or turn > 0.
+        MAX_SETUP = 60
+        for setup_step in range(MAX_SETUP):
+            if self._done:
+                logger.debug("Episode ended during setup at step %d", setup_step)
+                break
+
+            # ── Check whether the game has actually begun ─────────────────
+            cur = getattr(self._obs, "current", None)
+            if cur is not None:
+                try:
+                    our_idx  = int(getattr(cur, "yourIndex", 0))
+                    ps       = cur.players[our_idx]
+                    hand_cnt = int(getattr(ps, "handCount", 0))
+                    turn_num = int(getattr(cur, "turn", 0))
+                    if hand_cnt > 0 or turn_num > 0:
+                        logger.info(
+                            "Game started: setup_step=%d turn=%d hand=%d",
+                            setup_step, turn_num, hand_cnt,
+                        )
+                        break
+                except Exception:
+                    pass   # keep looping
+
+            # ── Choose action to advance setup ────────────────────────────
+            # Priority:
+            #   1. obs.select  – cabt asking us to pick Active/bench card
+            #   2. obs.actions – normal action list (first legal action)
+            #   3. None        – safe no-op; engine auto-advances turn
+            try:
+                setup_action: Any = None
+
+                sel = getattr(self._obs, "select", None)
+                if sel is not None:
+                    try:
+                        sel_list = list(sel)
+                        if sel_list:
+                            setup_action = sel_list[0]
+                            logger.debug(
+                                "Setup step %d: selecting from obs.select (len=%d)",
+                                setup_step, len(sel_list),
+                            )
+                    except Exception:
+                        pass
+
+                if setup_action is None:
+                    raw_actions = getattr(self._obs, "actions", None) or []
+                    try:
+                        raw_actions = list(raw_actions)
+                    except Exception:
+                        raw_actions = []
+                    if raw_actions:
+                        setup_action = raw_actions[0]
+                        logger.debug(
+                            "Setup step %d: using first of %d obs.actions",
+                            setup_step, len(raw_actions),
+                        )
+                    else:
+                        logger.debug(
+                            "Setup step %d: no select/actions — sending None",
+                            setup_step,
+                        )
+
+                self._obs, _, done, _ = self._trainer.step(setup_action)
+                self._done = bool(done)
+            except Exception as exc:
+                logger.debug("Setup step %d failed: %s", setup_step, exc)
+                break
+        else:
+            logger.warning(
+                "Game did not start after %d setup steps "
+                "— returning zero state", MAX_SETUP
+            )
+
         return self._parse_obs(self._obs)
+
+    # ------------------------------------------------------------------
+    def _build_integer_deck(self) -> list[int]:
+        """Return a 60-card deck as a list of integer card IDs.
+
+        Priority:
+          1. STARTER_DECKS entry for self._deck_key if it already contains ints.
+          2. build_valid_deck() — reads EN_Card_Data.csv, ensures at least one
+             Basic Pokémon so cabt does not auto-forfeit the game.
+          3. Hardcoded fallback: 4× ID 22 (Hippopotas) + 56× Basic Energy.
+        """
+        # 1. If STARTER_DECKS has been set to integer IDs, use them directly
+        raw = STARTER_DECKS.get(self._deck_key, [])
+        if raw and isinstance(raw[0], int):
+            ids = list(raw[:60])
+            while len(ids) < 60:
+                ids.append(ids[-1])
+            return ids[:60]
+
+        # 2. Build from CSV (includes Basic Pokémon so cabt doesn't forfeit)
+        try:
+            from card_data import build_valid_deck
+            from config import Config
+            cfg = Config()
+            return build_valid_deck(csv_path=cfg.card_csv, size=60)
+        except Exception as exc:
+            logger.warning("build_valid_deck() failed: %s", exc)
+
+        # 3. Last resort — hardcoded IDs from EN_Card_Data.csv inspection
+        # ID 22 = Hippopotas (Basic Pokémon), IDs 1-8 = Basic Energy
+        logger.warning("Using hardcoded fallback deck (ID 22 + Basic Energy)")
+        return [22] * 4 + ([1, 2, 3, 4, 5, 6, 7, 8] * 8)[:56]
+
 
     # ------------------------------------------------------------------
     def step(self, action_idx: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, bool]:
@@ -412,12 +543,25 @@ class LiveCabtEnv(CabtEnvBase):
         return state, a_feat, a_mask
 
     def _extract_state(self, obs: Any) -> np.ndarray:
-        """Map cabt Observation → (STATE_DIM,) float32 array."""
+        """Map cabt Observation → (STATE_DIM,) float32 array.
+
+        Confirmed obs.current structure (from live diagnostic):
+            obs.current.players    – list of two player-state Structs
+            obs.current.yourIndex  – integer index (0 or 1) for our player
+            obs.current.turn       – turn counter
+            obs.current.result     – game result (None while ongoing)
+        """
         state = np.zeros(STATE_DIM, dtype=np.float32)
         try:
-            from cg.api import AreaType as CgAreaType  # type: ignore
-            ps  = obs.current.players[0]   # our player
-            opp = obs.current.players[1]
+            cur = getattr(obs, "current", None)
+            if cur is None:
+                return state   # setup phase not complete yet
+
+            our_idx  = int(getattr(cur, "yourIndex", 0))
+            opp_idx  = 1 - our_idx
+            players  = cur.players
+            ps       = players[our_idx]
+            opp      = players[opp_idx]
 
             # ─── Active Pokémon (offset 0)
             if ps.active:
@@ -465,11 +609,12 @@ class LiveCabtEnv(CabtEnvBase):
                 )
 
             # ─── Board scalars (offset 448)
-            state[448] = len(ps.prize or []) / PRIZE_CARDS
+            state[448] = len(ps.prize  or []) / PRIZE_CARDS
             state[449] = len(opp.prize or []) / PRIZE_CARDS
-            state[450] = len(ps.hand or []) / HAND_MAX
-            state[451] = len(ps.bench or []) / MAX_BENCH
+            state[450] = len(ps.hand   or []) / HAND_MAX
+            state[451] = len(ps.bench  or []) / MAX_BENCH
             state[452] = len(opp.bench or []) / MAX_BENCH
+            state[453] = int(getattr(cur, "turn", 0)) / 100.0  # normalised turn
 
         except Exception as exc:
             logger.warning("State extraction failed: %s – returning zeros", exc)
@@ -479,11 +624,17 @@ class LiveCabtEnv(CabtEnvBase):
     def _get_legal_actions(self, obs: Any) -> list[Action]:
         """Extract legal actions from the cabt observation."""
         actions: list[Action] = []
+        raw_actions = []
+        if hasattr(obs, "actions"):
+            raw_actions = obs.actions or []
+        elif isinstance(obs, dict):
+            raw_actions = obs.get("actions") or []
+
         try:
-            for raw in (obs.actions or []):
-                atype = ActionType(min(int(getattr(raw, "type", 9)), NUM_ACTION_TYPES - 1))
-                src   = AreaType(min(int(getattr(raw, "src_area", 0)), NUM_ZONES - 1))
-                tgt   = AreaType(min(int(getattr(raw, "dst_area", 0)), NUM_ZONES - 1))
+            for raw in raw_actions:
+                atype = ActionType(min(int(getattr(raw, "type",     9)), NUM_ACTION_TYPES - 1))
+                src   = AreaType (min(int(getattr(raw, "src_area",  0)), NUM_ZONES - 1))
+                tgt   = AreaType (min(int(getattr(raw, "dst_area",  0)), NUM_ZONES - 1))
                 cid   = str(getattr(raw, "card_id", ""))
                 actions.append(Action(
                     action_type=atype, source_zone=src, target_zone=tgt,
@@ -494,17 +645,19 @@ class LiveCabtEnv(CabtEnvBase):
                 ))
         except Exception as exc:
             logger.warning("Action extraction failed: %s", exc)
+
         if not actions:
             actions.append(Action(ActionType.PASS, AreaType.HAND, AreaType.HAND))
         return actions
 
+
     def _action_to_cabt(self, action: Action) -> Any:
-        """Convert internal Action back to the format expected by cabt."""
+        """Convert internal Action back to the raw cabt object (or index fallback)."""
         raw = action.extra.get("raw")
         if raw is not None:
             return raw
-        # Fallback: return integer index (some cabt versions accept this)
         return action.source_idx
+
 
 
 # ---------------------------------------------------------------------------

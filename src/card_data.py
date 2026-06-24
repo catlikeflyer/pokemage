@@ -135,3 +135,105 @@ def VOCAB_SIZE() -> int:  # noqa: N802  (uppercase for constant-like access)
 # Allow `from card_data import VOCAB_SIZE` as a plain int at import time.
 # The actual value will be correct after _ensure_loaded() has run.
 VOCAB_SIZE: int = CARD_VOCAB_SIZE
+
+# ---------------------------------------------------------------------------
+# Deck-building helpers  (for live cabt submission — needs integer card IDs)
+# ---------------------------------------------------------------------------
+
+def build_valid_deck(csv_path: str = "./EN_Card_Data.csv", size: int = 60) -> list[int]:
+    """Build a minimal legal 60-card deck from EN_Card_Data.csv.
+
+    A legal Pokémon TCG deck must contain at least one Basic Pokémon.
+    Without one the cabt engine immediately ends the game as a forfeit.
+
+    Strategy
+    --------
+    1.  Find all unique Basic Pokémon IDs  (Stage column = 'Basic Pokémon').
+    2.  Find all Basic Energy IDs          (Stage column = 'Basic Energy').
+    3.  Fill the deck with 4× of the first available Basic Pokémon,
+        then pad to 60 with Basic Energy (repeating as needed).
+
+    Returns
+    -------
+    list[int]
+        60 integer card IDs suitable for trainer.step() on step 0.
+    """
+    stage_col = "Stage (Pokémon)/Type (Energy and Trainer)"
+    id_col    = "Card ID"
+
+    # Search for the CSV in several locations (handles Kaggle src/ layouts)
+    import os
+    search_paths = [
+        csv_path,
+        "./EN_Card_Data.csv",
+        "../EN_Card_Data.csv",
+        os.path.join(os.path.dirname(__file__), "..", "EN_Card_Data.csv"),
+        "/kaggle/working/EN_Card_Data.csv",
+        "/kaggle/working/src/EN_Card_Data.csv",
+        "/kaggle/input/pokemage-src/EN_Card_Data.csv",
+    ]
+    found_csv = next((p for p in search_paths if os.path.isfile(p)), None)
+
+    try:
+        if found_csv is None:
+            raise FileNotFoundError(f"EN_Card_Data.csv not found; searched: {search_paths}")
+        import pandas as pd  # type: ignore
+        df = pd.read_csv(found_csv)
+
+        basic_poke_ids = (
+            df[df[stage_col] == "Basic Pokémon"][id_col]
+            .dropna()
+            .astype(int)
+            .unique()
+            .tolist()
+        )
+        basic_energy_ids = (
+            df[df[stage_col] == "Basic Energy"][id_col]
+            .dropna()
+            .astype(int)
+            .unique()
+            .tolist()
+        )
+    except Exception as exc:
+        logger.warning("build_valid_deck: CSV parse failed (%s) — using hardcoded IDs", exc)
+        # Hardcoded fallback from EN_Card_Data.csv inspection:
+        # Basic Energy: 1-8, first Basic Pokémon: 22
+        basic_poke_ids  = [22, 24, 25, 27, 28]
+        basic_energy_ids = [1, 2, 3, 4, 5, 6, 7, 8]
+
+    if not basic_poke_ids:
+        logger.error("No Basic Pokémon found in CSV — cabt will forfeit immediately!")
+        basic_poke_ids = [22]
+    if not basic_energy_ids:
+        basic_energy_ids = [1]
+
+    # 4× copies of the first Basic Pokémon (max 4 per non-energy card in TCG rules)
+    n_poke = min(4, size)
+    deck   = [basic_poke_ids[0]] * n_poke
+
+    # Pad to 60 with Basic Energy (cycling through available types)
+    energy_pool = basic_energy_ids * ((size // len(basic_energy_ids)) + 2)
+    deck += energy_pool[: size - len(deck)]
+
+    assert len(deck) == size, f"build_valid_deck produced {len(deck)} cards, expected {size}"
+    logger.info(
+        "Built deck: 4× Pokémon ID %d + %d× Energy (IDs %s)",
+        basic_poke_ids[0], size - n_poke, basic_energy_ids[:4],
+    )
+    return deck
+
+
+def all_card_ids(csv_path: str = "./EN_Card_Data.csv") -> list[int]:
+    """Return all integer card IDs from EN_Card_Data.csv in order."""
+    try:
+        import pandas as pd  # type: ignore
+        df = pd.read_csv(csv_path)
+        id_col = next(
+            (c for c in df.columns if c.lower().replace(" ", "_") in {"card_id", "id"}),
+            None,
+        )
+        if id_col:
+            return df[id_col].dropna().astype(int).unique().tolist()
+    except Exception as exc:
+        logger.warning("all_card_ids failed: %s", exc)
+    return list(range(1, 101))
