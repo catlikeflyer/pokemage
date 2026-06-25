@@ -80,6 +80,17 @@ for f in "${SOURCE_FILES[@]}"; do
     fi
 done
 
+# Copy main.py from root
+if [[ -f "$SCRIPT_DIR/main.py" ]]; then
+    cp "$SCRIPT_DIR/main.py" "$OUTDIR/main.py"
+    main_size=$(wc -c < "$SCRIPT_DIR/main.py" | tr -d ' ')
+    printf "  ✓  %-22s  %d bytes\n" "main.py" "$main_size"
+else
+    echo "  ✗  main.py NOT FOUND – aborting"
+    exit 1
+fi
+
+
 # ── Copy card data CSV ───────────────────────────────────────────────────────
 if [[ -f "$SCRIPT_DIR/EN_Card_Data.csv" ]]; then
     cp "$SCRIPT_DIR/EN_Card_Data.csv" "$OUTDIR/EN_Card_Data.csv"

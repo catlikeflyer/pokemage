@@ -242,7 +242,7 @@ class TimeGatedAgent:
 def _run_eval(args: argparse.Namespace) -> None:
     cfg    = Config()
     agent  = TimeGatedAgent.from_checkpoint(args.checkpoint, cfg)
-    env    = make_env("mock", deck_key="dragapult_ex")
+    env    = make_env(args.env, deck_key="dragapult_ex")
 
     for ep in range(args.num_episodes):
         agent.reset_match_timer()
@@ -270,7 +270,10 @@ def _run_eval(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate time-gated Pokémon TCG agent")
-    parser.add_argument("--checkpoint",    type=str, default="./checkpoints/latest.pth")
-    parser.add_argument("--num_episodes",  type=int, default=3)
+    parser.add_argument("--checkpoint",   type=str, default="./checkpoints/latest.pth")
+    parser.add_argument("--num_episodes", type=int, default=3)
+    parser.add_argument("--env",          type=str, default="mock",
+                        choices=["mock", "live"],
+                        help="Environment to evaluate against (default: mock)")
     args = parser.parse_args()
     _run_eval(args)

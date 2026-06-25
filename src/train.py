@@ -458,52 +458,63 @@ def train(cfg: Config) -> None:
     losses: List[float] = []
     t_start = time.time()
 
-    logger.info("=" * 60)
-    logger.info("Starting training from game %d", start_game)
-    logger.info("=" * 60)
+    game_i = start_game - 1   # safe default if loop never executes
+    try:
+        for game_i in range(start_game, start_game + cfg.num_games):
+            # ── Collect one episode ───────────────────────────────────────
+            policy.eval()
+            trajectory = collect_episode(env, policy, cfg, device)
+            for t in trajectory:
+                buffer.add(t)
 
-    for game_i in range(start_game, start_game + cfg.num_games):
-        # ── Collect one episode ───────────────────────────────────────
-        policy.eval()
-        trajectory = collect_episode(env, policy, cfg, device)
-        for t in trajectory:
-            buffer.add(t)
+            ep_reward = sum(t.reward for t in trajectory)
+            episode_rewards.append(ep_reward)
 
-        ep_reward = sum(t.reward for t in trajectory)
-        episode_rewards.append(ep_reward)
+            # ── Gradient update every batch_games episodes ────────────────
+            if buffer.num_episodes() >= cfg.batch_games:
+                policy.train()
+                optimizer.zero_grad()
 
-        # ── Gradient update every batch_games episodes ────────────────
-        if buffer.num_episodes() >= cfg.batch_games:
-            policy.train()
-            optimizer.zero_grad()
+                if cfg.algo == "ppo":
+                    loss = ppo_loss(policy, buffer, cfg, device)
+                else:
+                    loss = reinforce_loss(policy, buffer, cfg, device)
 
-            if cfg.algo == "ppo":
-                loss = ppo_loss(policy, buffer, cfg, device)
-            else:
-                loss = reinforce_loss(policy, buffer, cfg, device)
+                loss.backward()
+                nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
+                optimizer.step()
 
-            loss.backward()
-            nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
-            optimizer.step()
+                loss_val = loss.item()
+                losses.append(loss_val)
+                buffer.clear()   # data consumed
 
-            loss_val = loss.item()
-            losses.append(loss_val)
-            buffer.clear()   # data consumed
+                avg_reward = np.mean(episode_rewards[-cfg.batch_games:])
+                elapsed    = time.time() - t_start
+                logger.info(
+                    "Game %5d | reward: %+.3f | loss: %.4f | elapsed: %.1fs",
+                    game_i + 1, avg_reward, loss_val, elapsed,
+                )
 
-            avg_reward = np.mean(episode_rewards[-cfg.batch_games:])
-            elapsed    = time.time() - t_start
-            logger.info(
-                "Game %5d | reward: %+.3f | loss: %.4f | elapsed: %.1fs",
-                game_i + 1, avg_reward, loss_val, elapsed,
-            )
+                # ── Save after every gradient update so progress is never lost ──
+                save_checkpoint(policy, optimizer, game_i + 1, cfg)
 
-        # ── Periodic memory flush & checkpoint ───────────────────────
-        if (game_i + 1) % cfg.flush_every == 0:
+            # ── Periodic full memory flush (GC + cache clear) ─────────────
+            if (game_i + 1) % cfg.flush_every == 0:
+                flush_memory(policy, optimizer, game_i + 1, cfg, buffer)
+
+    except Exception as exc:
+        logger.error("Training loop crashed at game %d: %s", game_i + 1, exc, exc_info=True)
+        raise
+    finally:
+        # ── Always write a final checkpoint, even on crash ────────────
+        try:
             flush_memory(policy, optimizer, game_i + 1, cfg, buffer)
-
-    # ── Final checkpoint ─────────────────────────────────────────────
-    flush_memory(policy, optimizer, start_game + cfg.num_games, cfg, buffer)
-    env.close()
+        except Exception as ckpt_exc:
+            logger.error("Final checkpoint failed: %s", ckpt_exc)
+        try:
+            env.close()
+        except Exception:
+            pass
 
     total_time = time.time() - t_start
     logger.info("=" * 60)
