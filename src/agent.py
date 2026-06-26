@@ -35,7 +35,13 @@ import time
 from typing import Any
 
 # ── Resolve submission directory so imports work regardless of cwd ─────────
-_AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if "__file__" in globals():
+    _AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
+else:
+    _AGENT_DIR = "/kaggle_simulations/agent"
+    if not os.path.isdir(_AGENT_DIR):
+        _AGENT_DIR = os.path.dirname(os.path.abspath(sys.argv[0])) if (globals().get("sys") and sys.argv) else os.getcwd()
+
 if _AGENT_DIR not in sys.path:
     sys.path.insert(0, _AGENT_DIR)
 
@@ -50,10 +56,6 @@ from env_wrapper import (
     ActionType,
     AreaType,
     extract_action_features,
-    _safe_hp_frac,
-    _safe_energies,
-    _safe_status,
-    _safe_is_ex,
     _encode_card_scalar,
     _zone_pool,
     NUM_ACTION_TYPES,
@@ -168,20 +170,78 @@ def _dims() -> tuple[int, int, int, int, int]:
     return _STATE_DIM, _CARD_FEATS, _PRIZE_CARDS, _HAND_MAX, _MAX_BENCH
 
 
+def safe_get(obj: Any, key: str, default: Any = None) -> Any:
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _safe_hp_frac(pokemon: Any) -> float:
+    try:
+        hp = int(safe_get(pokemon, "hp", 0))
+        max_hp = int(safe_get(pokemon, "max_hp", 1))
+        return max(0.0, min(1.0, hp / max(max_hp, 1)))
+    except Exception:
+        return 1.0
+
+
+def _safe_energies(pokemon: Any) -> list[int]:
+    try:
+        energy = safe_get(pokemon, "energy")
+        return [int(safe_get(energy, t, 0)) for t in
+                ("fire", "water", "grass", "lightning", "fighting", "psychic")]
+    except Exception:
+        return [0] * 6
+
+
+def _safe_status(pokemon: Any) -> list[int]:
+    try:
+        s = safe_get(pokemon, "status") or ""
+        return [
+            int("burn"    in str(s).lower()),
+            int("poison"  in str(s).lower()),
+            int("confuse" in str(s).lower()),
+            int("paraly"  in str(s).lower()),
+            int("asleep"  in str(s).lower()),
+        ]
+    except Exception:
+        return [0] * 5
+
+
+def _safe_is_ex(pokemon: Any) -> bool:
+    try:
+        name = str(safe_get(pokemon, "name", "") or "")
+        return " ex" in name.lower() or name.endswith(" EX")
+    except Exception:
+        return False
+
+
 def _extract_state(obs: Any) -> np.ndarray:
     """Convert a cabt Observation → (STATE_DIM,) float32."""
     STATE_DIM, CARD_FEATS, PRIZE_CARDS, HAND_MAX, MAX_BENCH = _dims()
     state = np.zeros(STATE_DIM, dtype=np.float32)
     try:
-        from cg.api import AreaType as CgAreaType  # type: ignore
-        ps  = obs.current.players[0]
-        opp = obs.current.players[1]
+        current = safe_get(obs, "current")
+        if current is None:
+            return state
+
+        players = safe_get(current, "players")
+        if not players:
+            return state
+
+        our_idx  = int(safe_get(current, "yourIndex", 0))
+        opp_idx  = 1 - our_idx
+        ps  = players[our_idx]
+        opp = players[opp_idx]
 
         # Active Pokémon (offset 0)
-        if ps.active:
-            act = ps.active[0]
+        active = safe_get(ps, "active")
+        if active:
+            act = active[0]
             state[:CARD_FEATS] = _encode_card_scalar(
-                card_id=str(getattr(act, "card_id", "")),
+                card_id=str(safe_get(act, "card_id", "")),
                 hp_frac=_safe_hp_frac(act),
                 energies=_safe_energies(act),
                 status=_safe_status(act),
@@ -189,31 +249,34 @@ def _extract_state(obs: Any) -> np.ndarray:
             )
 
         # Bench (offset 64)
+        bench = safe_get(ps, "bench") or []
         bench_cards = [
             dict(
-                card_id=str(getattr(p, "card_id", "")),
+                card_id=str(safe_get(p, "card_id", "")),
                 hp_frac=_safe_hp_frac(p),
                 energies=_safe_energies(p),
                 status=_safe_status(p),
                 is_ex=_safe_is_ex(p),
             )
-            for p in (ps.bench or [])
+            for p in bench
         ]
         state[64 : 64 + CARD_FEATS] = _zone_pool(bench_cards)
 
         # Hand (offset 128)
+        hand = safe_get(ps, "hand") or []
         hand_cards = [
-            dict(card_id=str(getattr(c, "card_id", "")),
+            dict(card_id=str(safe_get(c, "card_id", "")),
                  hp_frac=1.0, energies=None, status=None, is_ex=False)
-            for c in (ps.hand or [])
+            for c in hand
         ]
         state[128 : 128 + CARD_FEATS] = _zone_pool(hand_cards)
 
         # Opponent active (offset 256)
-        if opp.active:
-            oact = opp.active[0]
+        opp_active = safe_get(opp, "active")
+        if opp_active:
+            oact = opp_active[0]
             state[256 : 256 + CARD_FEATS] = _encode_card_scalar(
-                card_id=str(getattr(oact, "card_id", "")),
+                card_id=str(safe_get(oact, "card_id", "")),
                 hp_frac=_safe_hp_frac(oact),
                 energies=_safe_energies(oact),
                 status=_safe_status(oact),
@@ -221,11 +284,12 @@ def _extract_state(obs: Any) -> np.ndarray:
             )
 
         # Board scalars (offset 448)
-        state[448] = len(ps.prize or [])  / PRIZE_CARDS
-        state[449] = len(opp.prize or []) / PRIZE_CARDS
-        state[450] = len(ps.hand or [])   / HAND_MAX
-        state[451] = len(ps.bench or [])  / MAX_BENCH
-        state[452] = len(opp.bench or []) / MAX_BENCH
+        state[448] = len(safe_get(ps, "prize") or [])  / PRIZE_CARDS
+        state[449] = len(safe_get(opp, "prize") or []) / PRIZE_CARDS
+        state[450] = len(safe_get(ps, "hand") or [])   / HAND_MAX
+        state[451] = len(safe_get(ps, "bench") or [])  / MAX_BENCH
+        state[452] = len(safe_get(opp, "bench") or []) / MAX_BENCH
+        state[453] = int(safe_get(current, "turn", 0)) / 100.0  # normalised turn
 
     except Exception as exc:
         logger.warning("_extract_state error: %s", exc)
@@ -234,19 +298,30 @@ def _extract_state(obs: Any) -> np.ndarray:
 
 
 def _get_legal_actions(obs: Any) -> list[Action]:
-    """Parse obs.actions into internal Action objects."""
+    """Parse obs.actions or obs.select.option into internal Action objects."""
     actions: list[Action] = []
+    raw_actions = []
+    
+    # Check if select.option exists (real Kaggle env)
+    sel = safe_get(obs, "select")
+    if sel is not None:
+        raw_actions = safe_get(sel, "option") or []
+    
+    # Fallback to actions (mock/self-test)
+    if not raw_actions:
+        raw_actions = safe_get(obs, "actions") or []
+
     try:
-        for raw in (obs.actions or []):
-            atype = ActionType(min(int(getattr(raw, "type",     9)), NUM_ACTION_TYPES - 1))
-            src   = AreaType (min(int(getattr(raw, "src_area",  0)), NUM_ZONES - 1))
-            tgt   = AreaType (min(int(getattr(raw, "dst_area",  0)), NUM_ZONES - 1))
-            cid   = str(getattr(raw, "card_id", ""))
+        for raw in raw_actions:
+            atype = ActionType(min(int(safe_get(raw, "type", 9)), NUM_ACTION_TYPES - 1))
+            src   = AreaType (min(int(safe_get(raw, "src_area", 0)), NUM_ZONES - 1))
+            tgt   = AreaType (min(int(safe_get(raw, "dst_area", 0)), NUM_ZONES - 1))
+            cid   = str(safe_get(raw, "card_id", ""))
             actions.append(Action(
                 action_type=atype, source_zone=src, target_zone=tgt,
                 card_id=cid,
-                source_idx=int(getattr(raw, "src_idx", 0)),
-                target_idx=int(getattr(raw, "dst_idx", 0)),
+                source_idx=int(safe_get(raw, "src_idx", 0)),
+                target_idx=int(safe_get(raw, "dst_idx", 0)),
                 extra={"raw": raw},
             ))
     except Exception as exc:
@@ -257,27 +332,40 @@ def _get_legal_actions(obs: Any) -> list[Action]:
     return actions
 
 
-def _action_to_cabt(action: Action) -> Any:
-    """Convert internal Action back to the raw cabt object (or index fallback)."""
-    raw = action.extra.get("raw")
-    return raw if raw is not None else action.source_idx
+def get_action_list(action_idx: int, max_count: int, num_options: int) -> list[int]:
+    selected = [action_idx]
+    for i in range(num_options):
+        if len(selected) >= max_count:
+            break
+        if i not in selected:
+            selected.append(i)
+    while len(selected) < max_count:
+        selected.append(0)
+    return selected
 
 
-def _random_action(obs: Any) -> Any:
-    """Instantly return a random legal action (fallback)."""
+def _random_action(obs: Any) -> list[int]:
+    """Instantly return a random legal action (fallback) as a list[int]."""
     try:
-        acts = list(obs.actions or [])
-        return random.choice(acts) if acts else None
+        sel = safe_get(obs, "select")
+        if sel is not None:
+            opts = safe_get(sel, "option") or []
+            max_count = int(safe_get(sel, "maxCount", 1) or 1)
+            if opts:
+                idxs = list(range(len(opts)))
+                return random.sample(idxs, min(max_count, len(idxs)))
+        
+        # Fallback for mock/self-test if options aren't in select
+        acts = safe_get(obs, "actions") or []
+        if acts:
+            return [random.choice(range(len(acts)))]
+        return [0]
     except Exception:
-        return None
+        return [0]
 
 
-# ---------------------------------------------------------------------------
-# Model inference
-# ---------------------------------------------------------------------------
-
-def _model_action(obs: Any) -> Any:
-    """Run the policy forward pass and return the chosen cabt action object."""
+def _model_action_idx(obs: Any) -> int:
+    """Run the policy forward pass and return the chosen action index."""
     state_feat   = _extract_state(obs)
     legal_actions = _get_legal_actions(obs)
     action_feat, action_mask = extract_action_features(legal_actions)
@@ -289,27 +377,12 @@ def _model_action(obs: Any) -> Any:
     with torch.no_grad():
         action_idx, _, _ = _policy.act(s_t, a_t, m_t)
 
-    chosen = legal_actions[action_idx]
-    return _action_to_cabt(chosen)
+    return action_idx
 
-
-# ---------------------------------------------------------------------------
-# Main entry point — called by Kaggle evaluator every turn
-# ---------------------------------------------------------------------------
 
 def agent(obs: Any, config: Any) -> Any:
     """
     Kaggle cabt agent entry point.
-
-    Parameters
-    ----------
-    obs    : cabt Observation object
-    config : cabt environment config
-
-    Returns
-    -------
-    On step 0 : list[str]  — 60-card deck
-    Otherwise : raw cabt action object (or int index as fallback)
     """
     global _match_t0, _n_turns, _n_model, _n_random
 
@@ -317,15 +390,36 @@ def agent(obs: Any, config: Any) -> Any:
     _bootstrap()
 
     # ── Step 0: submit deck ───────────────────────────────────────────
-    step = getattr(obs, "step", None)
+    step = safe_get(obs, "step")
     if step == 0 or step is None:
         _match_t0 = time.monotonic()
         logger.warning("Match start – deck submitted (%s)", SUBMIT_DECK_KEY)
-        return STARTER_DECKS.get(SUBMIT_DECK_KEY, STARTER_DECKS["dragapult_ex"])
+        
+        # In Kaggle/evaluator environment, we must return a valid 60-card deck with integer IDs.
+        # Check if STARTER_DECKS contains integer IDs, else build one from the CSV.
+        raw_deck = STARTER_DECKS.get(SUBMIT_DECK_KEY, [])
+        if raw_deck and isinstance(raw_deck[0], int):
+            deck = list(raw_deck[:60])
+            while len(deck) < 60:
+                deck.append(deck[-1])
+            return deck
+        
+        try:
+            from card_data import build_valid_deck
+            csv_path = _cfg.card_csv if _cfg else "./EN_Card_Data.csv"
+            deck = build_valid_deck(csv_path=csv_path, size=60)
+            logger.warning("Built valid 60-card integer ID deck: first 3 = %s", deck[:3])
+            return deck
+        except Exception as exc:
+            logger.warning("build_valid_deck failed (%s) – using hardcoded fallback", exc)
+            fallback_deck = [22] * 4 + ([1, 2, 3, 4, 5, 6, 7, 8] * 8)[:56]
+            return fallback_deck
 
     # ── Time accounting ───────────────────────────────────────────────
     elapsed        = time.monotonic() - _match_t0
-    time_remaining = getattr(obs, "remaining_time", MATCH_BUDGET_S - elapsed)
+    time_remaining = safe_get(obs, "remaining_time")
+    if time_remaining is None:
+        time_remaining = MATCH_BUDGET_S - elapsed
     _n_turns += 1
 
     # ── Fallback conditions ───────────────────────────────────────────
@@ -345,7 +439,20 @@ def agent(obs: Any, config: Any) -> Any:
     # ── Model inference ───────────────────────────────────────────────
     try:
         _n_model += 1
-        return _model_action(obs)
+        action_idx = _model_action_idx(obs)
+        
+        # Get maxCount from obs.select
+        sel = safe_get(obs, "select")
+        max_count = int(safe_get(sel, "maxCount", 1) or 1) if sel else 1
+        
+        # Get number of options
+        legal_actions = _get_legal_actions(obs)
+        num_options = len(legal_actions)
+        
+        # Build list[int] of indices
+        action_list = get_action_list(action_idx, max_count, num_options)
+        return action_list
+        
     except Exception as exc:
         _n_random += 1
         logger.warning("Model inference failed (%s) – random fallback", exc)
@@ -375,14 +482,20 @@ if __name__ == "__main__":
     print(f"  ✓ Bootstrap complete | device={_device} | "
           f"checkpoint={'found' if any(os.path.exists(p) for p in CHECKPOINT_PATHS) else 'NOT FOUND (random weights)'}")
 
+    class _MockPlayer:
+        active = []
+        bench = []
+        hand = []
+        prize = []
+
     # ── Mock obs for deck step ─────────────────────────────────────────
     class _MockObs:
         step           = 0
         actions        = []
         remaining_time = 540.0
         class current:
-            class players:
-                pass
+            yourIndex = 0
+            players = [_MockPlayer(), _MockPlayer()]
 
     deck = agent(_MockObs(), None)
     assert isinstance(deck, list) and len(deck) > 0, f"Expected non-empty deck, got {deck!r}"
@@ -404,8 +517,8 @@ if __name__ == "__main__":
         remaining_time = 400.0
         actions        = [_MockAction(), _MockAction()]
         class current:
-            class players:
-                pass
+            yourIndex = 0
+            players = [_MockPlayer(), _MockPlayer()]
 
     result = agent(_MockTurnObs(), None)
     print(f"  ✓ Step 1 → action returned: {result!r}")

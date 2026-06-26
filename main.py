@@ -19,7 +19,13 @@ import os
 import sys
 
 # ── Make supporting modules importable regardless of cwd ───────────────────
-_HERE = os.path.dirname(os.path.abspath(__file__))
+if "__file__" in globals():
+    _HERE = os.path.dirname(os.path.abspath(__file__))
+else:
+    _HERE = "/kaggle_simulations/agent"
+    if not os.path.isdir(_HERE):
+        _HERE = os.path.dirname(os.path.abspath(sys.argv[0])) if (globals().get("sys") and sys.argv) else os.getcwd()
+
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 

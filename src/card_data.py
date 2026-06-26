@@ -163,15 +163,31 @@ def build_valid_deck(csv_path: str = "./EN_Card_Data.csv", size: int = 60) -> li
 
     # Search for the CSV in several locations (handles Kaggle src/ layouts)
     import os
+    import sys
+
+    current_dir = None
+    if "__file__" in globals():
+        current_dir = os.path.dirname(__file__)
+    else:
+        current_dir = "/kaggle_simulations/agent"
+        if not os.path.isdir(current_dir):
+            current_dir = os.path.dirname(os.path.abspath(sys.argv[0])) if (globals().get("sys") and sys.argv) else os.getcwd()
+
     search_paths = [
         csv_path,
         "./EN_Card_Data.csv",
         "../EN_Card_Data.csv",
-        os.path.join(os.path.dirname(__file__), "..", "EN_Card_Data.csv"),
+        os.path.join(current_dir, "..", "EN_Card_Data.csv") if current_dir else None,
+        os.path.join(current_dir, "EN_Card_Data.csv") if current_dir else None,
         "/kaggle/working/EN_Card_Data.csv",
         "/kaggle/working/src/EN_Card_Data.csv",
         "/kaggle/input/pokemage-src/EN_Card_Data.csv",
+        "/kaggle/input/dollis/datasets/pokemage-src/EN_Card_Data.csv",
+        "/kaggle/input/dollis/datasets/pokemage/EN_Card_Data.csv",
+        "kaggle/dollis/datasets/pokemage-src/EN_Card_Data.csv",
+        "kaggle/dollis/datasets/pokemage/EN_Card_Data.csv",
     ]
+    search_paths = [p for p in search_paths if p is not None]
     found_csv = next((p for p in search_paths if os.path.isfile(p)), None)
 
     try:
