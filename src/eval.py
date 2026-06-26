@@ -119,10 +119,17 @@ class TimeGatedAgent:
             )
             policy = PolicyNetwork(cfg)
         else:
-            state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-            policy = PolicyNetwork(cfg)
-            policy.load_state_dict(state["model_state"])
-            logger.info("Loaded checkpoint: %s", checkpoint_path)
+            try:
+                state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+                policy = PolicyNetwork(cfg)
+                policy.load_state_dict(state["model_state"])
+                logger.info("Loaded checkpoint: %s", checkpoint_path)
+            except Exception as e:
+                logger.warning(
+                    "Failed to load checkpoint '%s' (%s) – using random policy.",
+                    checkpoint_path, e
+                )
+                policy = PolicyNetwork(cfg)
 
         return cls(policy=policy, device=device)
 

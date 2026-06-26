@@ -357,7 +357,13 @@ def load_checkpoint(
 def get_device() -> torch.device:
     """Return the best available accelerator: CUDA > MPS > CPU."""
     if torch.cuda.is_available():
-        return torch.device("cuda")
+        try:
+            # Test if CUDA is compatible and works (handles sm_60 / P100 incompatibility with newer PyTorch)
+            x = torch.zeros(1, device="cuda")
+            _ = torch.nn.functional.gelu(x)
+            return torch.device("cuda")
+        except Exception as e:
+            logger.warning("CUDA is available but testing failed (%s). Falling back to CPU.", e)
     if torch.backends.mps.is_available() and torch.backends.mps.is_built():
         return torch.device("mps")
     return torch.device("cpu")
